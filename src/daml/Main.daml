@@ -1,0 +1,117 @@
+daml 1.2
+
+module Main where
+
+import DA.Date (toDateUTC)
+
+type Doctor = Party
+type Patient = Party
+type Pharmacy = Party
+
+type DrugId = Text
+
+data Prescription = Prescription with
+    doctor     : Doctor
+    patient    : Patient
+    drugId     : DrugId
+    doses      : Int
+    expiration : Date
+  deriving (Eq, Show)
+
+-- A @Script@ is the virtualized equivalent of the physical piece of paper
+-- doctors used to write prescriptions on. It can be submitted by a patient to
+-- a pharmacy, and destroyed by the pharmacy after the prescription is filled.
+template Script
+    with
+        prescription : Prescription
+        holder       : Party
+    where
+        signatory holder
+        observer prescription.doctor, prescription.patient
+
+        choice Submit : ContractId ScriptSubmission
+            with
+                newHolder : Pharmacy
+            controller holder, newHolder
+            do
+                now <- getTime
+                assert $ (toDateUTC now) <= prescription.expiration
+                create ScriptSubmission with
+                    script = this
+                    pharmacy = newHolder
+
+        -- A @Script@ can be destroyed by any holder---patient or
+        -- pharmacy---when destroyed it is consumed and archived.
+        choice Destroy : ()
+            controller holder
+            do
+                return ()
+    {-
+        *NOTICE:* it appears you cannot use @choice@ and @controller@ syntax
+        within the same template. Doing so seems to produce the following
+        error:
+
+        > parse error (possibly incorrect indentation or mismatched brackets)
+
+        controller holder can
+            Destroy : ()
+            do
+                return ()
+    -}
+
+-- A @CareProvider@ contract establishes a relationship between a doctor and
+-- patient that allows, for purposes of this example, a doctor to write
+-- prescriptions for a patient.
+--
+-- Only a patient can create a care provider relationship with a doctor.
+--
+-- /Note:/ this does not address the situation in which a doctor might need to
+-- write prescriptions for a patient in an emergency situation. This situation
+-- should probably be considered off-ledger, as it is not the normal
+-- prescription workflow that is being addressed by this solution.
+template CareProvider
+    with
+        doctor  : Doctor
+        patient : Patient
+    where
+        signatory patient
+
+        ensure doctor /= patient
+
+        -- A doctor who is a care provider can create a @Script@ contract for
+        -- a patient they are in a care provider relationship with. When this
+        -- is done, the patient becomes the initial holder of the @Script@.
+        controller doctor can
+            nonconsuming WriteScript : ContractId Script
+                with
+                    prescription : Prescription
+                do
+                    assert $ doctor == prescription.doctor
+                    assert $ patient == prescription.patient
+
+                    create Script with
+                        prescription
+                        holder = patient
+
+-- A @ScriptSubmission@ contract initiates the transfer of a @Script@ from the
+-- current holder to a pharmacy.
+--
+-- Unlike the doctor-patient relationship, which are long-term, and, therefore,
+-- defined through a @CareProvider@ relationship role contract, the submission
+-- of a @Script@ to a pharmacy establishes a one-off relationship.
+template ScriptSubmission
+    with
+        script   : Script
+        pharmacy : Pharmacy
+    where
+        signatory script.holder
+
+        -- A pharmacy will only accept a @Script@ if it has not expired. If a
+        -- @Script@ is accepted by a pharmacy, the pharmacy becomes the holder
+        -- of the @Script@.
+        controller pharmacy can
+            AcceptScriptSubmission : ContractId Script
+                do
+                    now <- getTime
+                    assert $ (toDateUTC now) <= script.prescription.expiration
+                    create script with holder = pharmacy
